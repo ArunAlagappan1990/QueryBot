@@ -2,17 +2,16 @@ import os
 import re
 import faiss
 import openai
-import base64
 from threading import Thread
 import dash_bootstrap_components as dbc
-from dash import Dash, dcc, html, Input, Output, State, callback
+from dash import Dash, html, Input, Output, State
 from dash.exceptions import PreventUpdate
 from llama_index.core import (
     SimpleDirectoryReader,
-    load_index_from_storage,
     VectorStoreIndex,
     StorageContext,
-    Settings
+    Settings,
+    load_index_from_storage
 )
 from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.faiss import FaissVectorStore
@@ -22,18 +21,15 @@ app = Dash(__name__, external_stylesheets=[dbc.themes.MINTY])
 # Reference the underlying flask app (Used by gunicorn webserver in Heroku production deployment)
 server = app.server 
 
-# Global variables to store the index, query engine, and log messages
-global_index = None
-global_query_engine = None
-log_messages = []
-
 # dimensions of text-ada-embedding-002
 d = 1536
 faiss_index = faiss.IndexFlatL2(d)
 
+
 app.layout = dbc.Container([
     html.Br(),
     html.H1('LLM Query Assistant'),
+    html.H2("Kaplan and Sadock's Comprehensive Textbook of Psychiartry"),
     html.Br(),
     html.Div(
         [
@@ -41,37 +37,12 @@ app.layout = dbc.Container([
             dbc.Input(id='api-key', type='text', placeholder='Enter your API key here...')
         ]
     ),
-    html.Div(
-        [
-            dcc.Upload(
-                id='upload-pdf',
-                children=html.Div(['Drag and Drop or ', html.A('Select a PDF File')]),
-                style={
-                    'width': '100%',
-                    'height': '60px',
-                    'lineHeight': '60px',
-                    'borderWidth': '1px',
-                    'borderStyle': 'dashed',
-                    'borderRadius': '5px',
-                    'textAlign': 'center',
-                    'margin': '10px'
-                },
-                multiple=False,
-                accept='.pdf',
-            )
-        ]
-    ),
-    dbc.Spinner(html.Div(id='upload-status')),
     html.Br(),
     html.Div(
         [
             dbc.Button('Initialize Index', id='init-index-btn', n_clicks=0)
         ]
     ),
-    html.Br(),
-    html.H5('Indexing Log:'),
-    html.Ul(id='indexing-log'),
-    dcc.Interval(id='log-interval', interval=2000, n_intervals=0, disabled=True),  # Update every 2 seconds
     html.Br(),
     dbc.Spinner(
         children=[
@@ -97,31 +68,10 @@ app.layout = dbc.Container([
 
 ])
 
-@app.callback(
-    Output('upload-status', 'children'),
-    [Input('upload-pdf', 'contents')],
-    [State('upload-pdf', 'filename')]
-)
-def save_uploaded_file(contents, filename):
-    if contents is None:
-        raise PreventUpdate
-
-    content_type, content_string = contents.split(',')
-    decoded = base64.b64decode(content_string)
-
-    if not os.path.exists('data'):
-        os.makedirs('data')
-
-    file_path = os.path.join('data', filename)
-    with open(file_path, 'wb') as f:
-        f.write(decoded)
-
-    return f'File {filename} uploaded successfully!'
 
 @app.callback(
     [Output('my-input', 'disabled'),
-     Output('gen-button', 'disabled'),
-     Output('log-interval', 'disabled')],
+     Output('gen-button', 'disabled')],
     [Input('init-index-btn', 'n_clicks')],
     [State('api-key', 'value')]
 )
@@ -134,22 +84,18 @@ def initialize_index(n_clicks, api_key):
     openai.api_key = api_key
     Settings.llm = OpenAI(temperature=0.1, model="gpt-4")
 
+    # Check if the index is already loaded
+    try:
+        global_index 
+    except NameError:
+        # Start the indexing process in a separate thread
+        indexing_thread = Thread(target=run_indexing_process)
+        indexing_thread.start()
 
-    # Start the indexing process in a separate thread
-    indexing_thread = Thread(target=run_indexing_process)
-    indexing_thread.start()
+        # Wait for the indexing process to finish
+        indexing_thread.join()
 
-    # Wait for the indexing process to finish
-    indexing_thread.join()
-
-    return False, False, False  # Enable input, button, and log interval
-
-@app.callback(
-    Output('indexing-log', 'children'),
-    [Input('log-interval', 'n_intervals')]
-)
-def update_indexing_log(n_intervals):
-    return [html.Li(msg) for msg in log_messages]
+    return False, False  # Enable input, button, and log interval
 
 @app.callback(
     Output('my-output', 'children'),
@@ -159,7 +105,7 @@ def update_indexing_log(n_intervals):
 )
 def update_output_div(gen, api_key, input_value):
     if gen == 0 or not api_key or not input_value:
-        return 'Enter your API key, upload a PDF file, and enter your text, then click "Generate Text".'
+        return 'Enter your API key, and enter your text, then click "Generate Text".'
 
     response = global_query_engine.query(input_value)
 
@@ -175,24 +121,26 @@ def update_output_div(gen, api_key, input_value):
 def run_indexing_process():
     global global_index, global_query_engine, log_messages
 
-    PERSIST_DIR = "./storage"
+    PERSIST_DIR = "./vector_storage"
 
-    log_messages.append('Chunking & loading the uploaded files...')
-    documents = SimpleDirectoryReader("data").load_data()
-    log_messages.append(f'Loaded {len(documents)} documents.')
-
-    vector_store = FaissVectorStore(faiss_index=faiss_index)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    log_messages.append(f'Indexing...')
-    index = VectorStoreIndex.from_documents(
-        documents, storage_context=storage_context, show_progress=True
+    if not os.path.exists(PERSIST_DIR):
+        documents = SimpleDirectoryReader("data").load_data()
+        vector_store = FaissVectorStore(faiss_index=faiss_index)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        index = VectorStoreIndex.from_documents(
+            documents, storage_context=storage_context, show_progress=True
+            )
+        index.storage_context.persist(persist_dir=PERSIST_DIR)
+    else:
+        vector_store = FaissVectorStore.from_persist_dir(PERSIST_DIR)
+        storage_context = StorageContext.from_defaults(
+            vector_store = vector_store, persist_dir=PERSIST_DIR
         )
-    log_messages.append('Indexing completed. Persisting index...')
-    index.storage_context.persist(persist_dir=PERSIST_DIR)
-    log_messages.append('Index persisted successfully.')
+        index = load_index_from_storage(storage_context=storage_context)
 
     global_index = index
     global_query_engine = index.as_query_engine()
+
 
 if __name__ == '__main__':
     app.run_server(debug=False, host='0.0.0.0', port=8050)
