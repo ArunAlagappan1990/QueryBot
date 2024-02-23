@@ -19,6 +19,9 @@ from llama_index.vector_stores.faiss import FaissVectorStore
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.MINTY])
 
+# Reference the underlying flask app (Used by gunicorn webserver in Heroku production deployment)
+server = app.server 
+
 # Global variables to store the index, query engine, and log messages
 global_index = None
 global_query_engine = None
@@ -192,4 +195,4 @@ def run_indexing_process():
     global_query_engine = index.as_query_engine()
 
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    app.run_server(debug=False, host='0.0.0.0', port=8050)
